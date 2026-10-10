@@ -1,2 +1,2 @@
-1.0.1
-Fixes the setup window's lines overlapping when it opens.
+1.1.0
+Lamps are shared with your party (//nz sync on) and between characters on the same PC.

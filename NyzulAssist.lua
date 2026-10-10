@@ -23,7 +23,7 @@ Use at your own risk: Square Enix's ToS does not allow third-party tools.
 
 _addon.name     = 'NyzulAssist'
 _addon.author   = 'SmallnDumb'
-_addon.version  = '1.0.1'
+_addon.version  = '1.1.0'
 _addon.commands = {'nyzulassist', 'nz'}
 _addon.language = 'english'
 
@@ -139,6 +139,7 @@ local defaults = {
     lamp_read_wait  = 14,     -- seconds after the last lamp of a round before reading lamp states
     request_updates = false,  -- inject 0x016 to see far-away lamps (extra packet injection!)
     pause_on_tell   = true,
+    sync            = false,                -- share lamps with party members running NyzulAssist ("[NZ]" party chat lines)
     update_check    = false,                -- look for a newer version once a week, at login (//nz update on)
     setup_pos       = {x = 560, y = 200},   -- where the //nz setup window opens
     welcomed        = false,                -- (said hello once)
@@ -247,6 +248,11 @@ local function reset_floor_state()
     S.cool         = {}       -- [lamp slot] = os.clock() until it can be touched again
     S.same_plan      = nil      -- "all at once" lamps: {key, order}
     S.same_failed    = nil      -- os.clock() of the last failed "all at once" try
+    S.round_bad      = nil      -- this round's touches (with other players') can't be put in order
+    S.sync_wait      = {}       -- [position] = a partner's touch that came before the ones ahead of it
+    S.sync_sent      = {}       -- what this floor's lamps news has already gone out (and what came in)
+    S.sync_queue     = {}       -- news waiting for the next party line
+    S.sync_from      = nil      -- name of the last party member whose lamp news came in
 end
 
 local function reset_run()
@@ -630,7 +636,7 @@ local function more_lamps(why)
     if n >= 5 then return end
     S.lamp_min = n + 1
     S.pending_eval = nil
-    S.round = {}
+    S.round, S.round_bad, S.sync_wait = {}, nil, {}
     for i, sl in ipairs(S.game_round) do S.round[i] = sl end
     for i = #S.rounds, 1, -1 do                      -- (rounds read with too few lamps don't count)
         if #S.rounds[i].order < S.lamp_min then table.remove(S.rounds, i) end
@@ -782,7 +788,7 @@ local function describe_round(r)
     return table.concat(parts, ' ')
 end
 
-local function evaluate_round(order, t_end)
+local function evaluate_round(order, t_end, remote)
     local slots = lamp_slots()
     local _, confirmed = Solver.knowledge(slots, S.rounds)
     local lit, unknown = {}, {}
@@ -798,12 +804,15 @@ local function evaluate_round(order, t_end)
             lit[s] = true
         elseif confirmed[s] == pos then
             lit[s] = true
+        elseif remote and remote[s] ~= nil then
+            lit[s] = remote[s]                       -- (a party member could see it)
         else
             unknown[#unknown + 1] = letter(s)
         end
     end
     local r = {order = order, lit = (#unknown == 0) and lit or nil, guess = lit, t_end = t_end}
     S.rounds[#S.rounds + 1] = r
+    if r.lit then FAX.Sync.note_result(r) end
     if #unknown > 0 then
         say(('Round %d done. Couldn\'t see lamp(s) %s from here - walk past them and I\'ll fill them in, '
             .. 'or type //nz lit <letters that stayed ON> (e.g. //nz lit AC).')
@@ -821,26 +830,32 @@ local function evaluate_round(order, t_end)
     end
 end
 
-local function on_lamp_touch(slot)
-    S.last_touch = {slot = slot, t = os.clock()}
+-- a lamp touch: yours, or (from = their name) a party member's that their NyzulAssist shared
+local function on_lamp_touch(slot, from)
+    if not from then S.last_touch = {slot = slot, t = os.clock()} end
     S.touched[slot] = os.clock()
     if S.lamp_type == 'code' or S.lamp_type == 'same' then return end
     for _, s in ipairs(S.round) do
         if s == slot then return end
     end
     S.round[#S.round + 1] = slot
+    if not from then S.last_touch.pos = #S.round end
     local known = false
     for _, s in ipairs(S.game_round) do if s == slot then known = true end end
-    if not known then S.game_round[#S.game_round + 1] = slot; S.last_touch.game_new = true end
-    debug_log(('lamp touch %s, round so far %d/%d'):format(letter(slot), #S.round, lamp_count()))
+    if not known then
+        S.game_round[#S.game_round + 1] = slot
+        if not from then S.last_touch.game_new = true end
+    end
+    debug_log(('lamp touch %s%s, round so far %d/%d'):format(letter(slot), from and (' by ' .. from) or '', #S.round, lamp_count()))
     local n = lamp_count()
     -- (never a round of one: the first touch can come before the game says what kind of lamps
     -- they are, and "in order" means two or more - one test run read a "round" of lamp A
     -- alone, couldn't make sense of it and stopped)
     if n >= 2 and #S.round >= n then
         -- Wait until the Yes/No menu is closed, then give the lamps a few seconds to change.
-        S.pending_eval = {order = S.round, touched_at = os.clock()}
-        S.round = {}
+        -- (a party member's touch comes in a moment after it happened)
+        S.pending_eval = {order = S.round, touched_at = os.clock() - (from and 1 or 0), bad = S.round_bad}
+        S.round, S.round_bad, S.sync_wait = {}, nil, {}
     end
 end
 
@@ -859,6 +874,7 @@ local function undo_last_touch()
     end
     S.last_touch = nil
     debug_log('lamp touch undone (event skipped): ' .. letter(lt.slot))
+    if lt.sent then FAX.Sync.send(('u%s%d'):format(letter(lt.slot), lt.pos or 0)) end
 end
 
 local function lamp_eval_tick()
@@ -876,8 +892,12 @@ local function lamp_eval_tick()
     local settled = not S.last_on_t or S.last_on_t < pe.touched_at or now - S.last_on_t >= 11
     if now - pe.touched_at >= settings.lamp_read_wait and settled then
         S.pending_eval = nil
+        if pe.bad then
+            say('Two lamps of that round were touched at nearly the same time, so I can\'t tell their order - ignoring that round.')
+            return
+        end
         if S.lamp_type == 'order' or S.lamp_type == nil then
-            evaluate_round(pe.order, pe.touched_at)
+            evaluate_round(pe.order, pe.touched_at, pe.remote)
         end
     end
 end
@@ -903,6 +923,7 @@ lamp_late_reading = function(slot, lit)
     for _, s in ipairs(r.order) do if r.guess[s] == nil then return end end
     r.lit = r.guess
     S.plan = nil
+    FAX.Sync.note_result(r)
     say(('Round %d (filled in as you walked by): %s'):format(#S.rounds, describe_round(r)))
     local plan, n = current_plan()
     if plan then
@@ -921,8 +942,8 @@ lamp_switched_on = function(slot)
         debug_log(('lamps: the round ended after %d - there are only %d'):format(#S.round, #S.round))
         S.lamp_min = nil
         if #S.round >= lamp_count() then
-            S.pending_eval = {order = S.round, touched_at = S.last_touch and S.last_touch.t or os.clock()}
-            S.round = {}
+            S.pending_eval = {order = S.round, touched_at = S.last_touch and S.last_touch.t or os.clock(), bad = S.round_bad}
+            S.round, S.round_bad, S.sync_wait = {}, nil, {}
             return
         end
     end
@@ -930,9 +951,310 @@ lamp_switched_on = function(slot)
         debug_log(('lamps lit after only %d of %d touches - round dropped'):format(#S.round, lamp_count()))
         say(('That round ended after I saw only %d of %d lamps - ignoring it. Your next touch starts a new round.')
             :format(#S.round, lamp_count()))
-        S.round = {}
+        S.round, S.round_bad, S.sync_wait = {}, nil, {}
         S.plan = nil
     end
+end
+
+---------------------------------------------------------------------------
+-- Lamp sharing: other NyzulAssist copies in your party learn what you see, and you what they see
+--   * same PC (multiboxing): always, straight from one copy to the other
+--   * other players: //nz sync on - short "[NZ] 12 tA2 pB510,-32" party lines, which their
+--     NyzulAssist reads and hides (theirs has to be on too for yours to hear from them)
+-- News: tA2 = lamp A was the 2nd touch of this round (tA0 = a touch on other lamp types),
+--   uA2 = that touch didn't take, pA510,-32 = where lamp A is, yo / ys / yc = the lamps are
+--   in order / all at once / certification, lA / dA = lamp A switched on / off (all at once),
+--   rCABD:AC = the round C A B D ended with A and C lit.
+---------------------------------------------------------------------------
+do
+local Sync = {applying = false, next_party = 0, peers = {}}
+FAX.Sync = Sync
+local TYPES = {o = 'order', s = 'same', c = 'code'}
+
+local function party_names()
+    local names, party = {}, windower.ffxi.get_party and windower.ffxi.get_party()
+    if not party then return names end
+    for _, k in ipairs({'p0', 'p1', 'p2', 'p3', 'p4', 'p5'}) do
+        local p = party[k]
+        if p and p.name and not (p.mob and p.mob.is_npc) then names[p.name] = true end
+    end
+    return names
+end
+
+function Sync.in_party(name)
+    return name ~= nil and party_names()[name] == true
+end
+
+function Sync.others_in_party()
+    local me = (windower.ffxi.get_player() or {}).name
+    for name in pairs(party_names()) do if name ~= me then return true end end
+    return false
+end
+
+local function letters(slots)
+    local t = {}
+    for i, s in ipairs(slots) do t[i] = letter(s) end
+    return table.concat(t)
+end
+
+-- send one piece of news: to the other copies on this PC now, to the party with the next line
+function Sync.send(tok)
+    if Sync.applying or not S.in_nyzul or (S.floor or 0) == 0 then return end
+    local me = windower.ffxi.get_player()
+    if me and windower.send_ipc_message then
+        pcall(windower.send_ipc_message, ('NyzulAssist|%s|%d|%s'):format(me.name or '?', S.floor, tok))
+    end
+    if settings.sync then S.sync_queue[#S.sync_queue + 1] = tok end
+end
+
+function Sync.flush()
+    if #S.sync_queue == 0 or os.clock() < Sync.next_party then return end
+    if not settings.sync or not Sync.others_in_party() then S.sync_queue = {}; return end
+    Sync.next_party = os.clock() + 1.5
+    local keys, len, i = {}, 0, 1
+    while i <= #S.sync_queue and (i == 1 or len + #S.sync_queue[i] < 90) do
+        keys[#keys + 1] = S.sync_queue[i]
+        len = len + #S.sync_queue[i] + 1
+        i = i + 1
+    end
+    local rest = {}
+    for j = i, #S.sync_queue do rest[#rest + 1] = S.sync_queue[j] end
+    S.sync_queue = rest
+    windower.send_command(('input /p [NZ] %d %s'):format(S.floor, table.concat(keys, ' ')))
+end
+
+-- your touch counts once you've answered the lamp's menu (backing out of it isn't a touch)
+function Sync.confirm(lt)
+    lt.answered = true
+    if lt.sent then return end
+    lt.sent = true
+    Sync.send(('t%s%d'):format(letter(lt.slot), lt.pos or 0))
+end
+
+-- your answer to a menu (outgoing 0x05B)
+function Sync.menu_answer(p)
+    local lt = S.last_touch
+    if not lt or lt.answered or not p then return end
+    local idx = p['Target Index']
+    if idx and idx ~= IDX_LAMP_FIRST + lt.slot - 1 then return end
+    if p['_unknown1'] == 16384 then undo_last_touch() return end      -- backed out: not a touch
+    if p['Automated Message'] then return end
+    Sync.confirm(lt)
+end
+
+function Sync.note_lit(slot, lit)
+    if S.lamp_type == 'same' then Sync.send((lit and 'l' or 'd') .. letter(slot)) end
+end
+
+function Sync.note_result(r)
+    if not r.lit or r.shared then return end
+    r.shared = true
+    local on = {}
+    for _, s in ipairs(r.order) do if r.lit[s] then on[#on + 1] = s end end
+    Sync.send(('r%s:%s'):format(letters(r.order), letters(on)))
+end
+
+local function bad_round(why)
+    if not S.round_bad then
+        S.round_bad = true
+        say(orange('Lamps: ') .. 'two touches came in for the same place in the round, so I can\'t tell its order. '
+            .. 'That round will be ignored - the next one starts fresh.')
+    end
+    debug_log('lamps: round order unclear - ' .. why)
+end
+
+-- fit in the touches that came early, now that the ones ahead of them are here
+local function drain()
+    while true do
+        local w = S.sync_wait[#S.round + 1]
+        if not w then return end
+        S.sync_wait[#S.round + 1] = nil
+        if os.clock() - w.t > 30 then return end
+        on_lamp_touch(w.slot, w.who)
+        if #S.round == 0 then S.sync_wait = {} return end    -- (that finished the round)
+    end
+end
+
+local function on_touch(slot, pos, who)
+    local now = os.clock()
+    if pos == 0 or S.lamp_type == 'same' or S.lamp_type == 'code' then
+        S.touched[slot] = now
+        return
+    end
+    if S.round[pos] == slot then return end                              -- (already have it)
+    for _, s in ipairs(S.round) do if s == slot then return end end    -- (a second touch the game ignores)
+    if #S.round == pos - 1 then
+        on_lamp_touch(slot, who)
+        drain()
+    elseif #S.round < pos - 1 then
+        S.sync_wait[pos] = {slot = slot, who = who, t = now}
+    else
+        bad_round(('%s says %s was touch %d; here that was %s'):format(who, letter(slot), pos, letter(S.round[pos])))
+    end
+end
+
+local function on_undo(slot, pos)
+    if pos == 0 or S.lamp_type == 'same' or S.lamp_type == 'code' then S.touched[slot] = nil return end
+    local pe = S.pending_eval
+    if pe and #pe.order == pos and pe.order[pos] == slot then
+        table.remove(pe.order)
+        S.round, S.pending_eval = pe.order, nil
+    elseif S.round[pos] == slot and #S.round == pos then
+        table.remove(S.round)
+    else
+        return
+    end
+    if S.game_round[#S.game_round] == slot then table.remove(S.game_round) end
+    S.touched[slot] = nil
+    debug_log('lamp touch undone by its owner: ' .. letter(slot))
+end
+
+local function same_order(a, b)
+    if #a ~= #b then return false end
+    for i = 1, #a do if a[i] ~= b[i] then return false end end
+    return true
+end
+
+local function announce(r, n, who)
+    say(('Round %d (from %s): %s'):format(n, who, describe_round(r)))
+    local plan, cands = current_plan()
+    if plan then
+        local t = {}
+        for i, s in ipairs(plan) do t[i] = letter(s) end
+        say(('Next try: %s  (%d possible order%s left)'):format(table.concat(t, ' > '), cands, cands == 1 and '' or 's'))
+    end
+end
+
+local function on_result(order, lit, who)
+    for i = #S.rounds, 1, -1 do
+        local r = S.rounds[i]
+        if same_order(r.order, order) then
+            if not r.lit then
+                r.lit, r.shared, S.plan = lit, true, nil
+                announce(r, i, who)
+            end
+            return
+        end
+    end
+    local pe = S.pending_eval
+    if pe and same_order(pe.order, order) then pe.remote = lit return end
+    if S.lamp_type == 'same' or S.lamp_type == 'code' then return end
+    -- a round this copy couldn't put together (it missed touches): take the partner's reading
+    S.lamp_type = 'order'
+    local r = {order = order, lit = lit, t_end = os.clock(), shared = true}
+    S.rounds[#S.rounds + 1] = r
+    local stale = true
+    for _, s in ipairs(S.round) do
+        local found = false
+        for _, o in ipairs(order) do if o == s then found = true end end
+        if not found then stale = false end
+    end
+    if stale then S.round, S.round_bad, S.sync_wait = {}, nil, {} end
+    S.plan = nil
+    announce(r, #S.rounds, who)
+end
+
+local function apply(tok, who)
+    local L, n = tok:match('^([tu])(%u%d)$')
+    if L then
+        local slot, pos = slot_from_letter(n:sub(1, 1)), tonumber(n:sub(2))
+        if not slot then return end
+        if L == 't' then on_touch(slot, pos, who) else on_undo(slot, pos) end
+        return
+    end
+    local x, y
+    L, x, y = tok:match('^p(%u)(%-?%d+),(%-?%d+)$')
+    if L then
+        local slot = slot_from_letter(L)
+        if not slot then return end
+        local l = S.lamps[slot]
+        if not (l and l.x and l.floor == S.floor_id) then
+            record_lamp(slot, tonumber(x), tonumber(y))
+            S.plan, S.same_plan = nil, nil
+            debug_log(('lamp %s found by %s at %s,%s'):format(L, who, x, y))
+        end
+        S.sync_sent['p' .. slot] = true
+        return
+    end
+    local ty = tok:match('^y([osc])$')
+    if ty then
+        if not S.lamp_type then
+            S.lamp_type, S.plan = TYPES[ty], nil
+            debug_log(('lamp type from %s: %s'):format(who, TYPES[ty]))
+        end
+        S.sync_sent.y = true
+        return
+    end
+    local onoff
+    onoff, L = tok:match('^([ld])(%u)$')
+    if onoff then
+        local slot = slot_from_letter(L)
+        if not slot or S.lamp_type == 'order' then return end
+        local l = S.lamps[slot] or {}
+        S.lamps[slot] = l
+        local lit, now = onoff == 'l', os.clock()
+        if l.lit ~= lit then
+            l.lit, l.flag_t = lit, now
+            if lit then l.lit_t = now else l.dark_t = now end
+        end
+        return
+    end
+    local ord, on = tok:match('^r(%u+):(%u*)$')
+    if ord then
+        local order, lit = {}, {}
+        for ch in ord:gmatch('%u') do
+            local slot = slot_from_letter(ch)
+            if not slot then return end
+            order[#order + 1] = slot
+            lit[slot] = false
+        end
+        for ch in on:gmatch('%u') do
+            local slot = slot_from_letter(ch)
+            if slot and lit[slot] ~= nil then lit[slot] = true end
+        end
+        if #order >= 2 then on_result(order, lit, who) end
+    end
+end
+
+-- news from another copy: "<floor> tok tok ..." (via = 'ipc' for a copy on this PC)
+function Sync.receive(body, who, via)
+    -- a copy on this PC sends the same news both ways: its party lines are already known
+    if via == 'ipc' then Sync.peers[who or ''] = os.clock()
+    elseif who and Sync.peers[who] and os.clock() - Sync.peers[who] < 3600 then return end
+    local floor, rest = body:match('^(%d+)%s+(.*)$')
+    if not floor or not S.in_nyzul or tonumber(floor) ~= S.floor or S.floor == 0 then return end
+    Sync.applying = true
+    local ok, err = pcall(function()
+        for tok in rest:gmatch('%S+') do apply(tok, who or 'party') end
+    end)
+    Sync.applying = false
+    if not ok then debug_log('lamp sharing: ' .. tostring(err)) end
+    if who then S.sync_from = who end
+end
+
+function Sync.tick()
+    if S.obj_type == 'lamps' then
+        -- what this copy found out itself (news that came in is marked as sent already)
+        if S.lamp_type and not S.sync_sent.y then
+            S.sync_sent.y = true
+            Sync.send('y' .. S.lamp_type:sub(1, 1))
+        end
+        for slot = 1, 5 do
+            local l = S.lamps[slot]
+            if l and l.x and l.floor == S.floor_id and not S.sync_sent['p' .. slot] then
+                S.sync_sent['p' .. slot] = true
+                Sync.send(('p%s%d,%d'):format(letter(slot), math.floor(l.x + 0.5), math.floor(l.y + 0.5)))
+            end
+        end
+        -- a touch with no menu answer seen: count it once you're out of the menu (20 s)
+        local lt = S.last_touch
+        if lt and not lt.answered and os.clock() - lt.t > 20 then
+            local p = windower.ffxi.get_player()
+            if p and p.status ~= 4 then Sync.confirm(lt) end
+        end
+    end
+    Sync.flush()
+end
 end
 
 ---------------------------------------------------------------------------
@@ -2701,7 +3023,8 @@ local function build_rows()
                   or 'touch one to learn the type'
         local seen = lamps_seen()
         add('Lamps:', ('%s - %s%s'):format(kind,
-            S.lamp_override and (n .. ' (set)') or seen < n and ('%d found, at least %d'):format(seen, n) or (n .. ' found'), ''))
+            S.lamp_override and (n .. ' (set)') or seen < n and ('%d found, at least %d'):format(seen, n) or (n .. ' found'),
+            S.sync_from and grey('   + ' .. S.sync_from) or ''))
         local nxt = next_lamp_slot()
         for slot = 1, n do
             local l = S.lamps[slot]
@@ -3002,6 +3325,7 @@ function Setup.items()
     local dirs = {compass = 'clock', clock = 'both', both = 'compass'}
     add('      Directions: ' .. settings.directions .. grey(' (click to switch)'), run('dir', dirs[settings.directions] or 'compass'))
     head('Other')
+    add(onoff(settings.sync) .. ' Share lamps with your party (party chat)', run('sync', settings.sync and 'off' or 'on'))
     add(onoff(S.debug) .. ' Debug log (for bug reports: //nz report)', run('debug'))
     add(onoff(settings.update_check) .. ' Look for a new version once a week, at login', run('update', settings.update_check and 'off' or 'on'))
     add(grey('Help: //nz help    Tips: ' .. FAX.TIP_URL))
@@ -3472,6 +3796,17 @@ end)
 
 local last_tick, last_draw, last_radar = 0, 0, 0
 
+-- another NyzulAssist on this PC (multiboxing): its lamp news, if it's in your party
+windower.register_event('ipc message', function(msg)
+    if type(msg) ~= 'string' or not S.in_nyzul then return end
+    local who, body = msg:match('^NyzulAssist|([^|]*)|(.+)$')
+    if not who then return end
+    local me = windower.ffxi.get_player()
+    if me and who == me.name then return end
+    body = body:gsub('|', ' ', 1)
+    if FAX.Sync.in_party(who) then FAX.Sync.receive(body, who, 'ipc') end
+end)
+
 windower.register_event('prerender', function()
     FAX.FA.tick()
     if not S.in_nyzul then return end
@@ -3481,6 +3816,7 @@ windower.register_event('prerender', function()
         if S.floor > 0 then FAX.Nav.record(me()) end
         poll_lamps()
         lamp_eval_tick()
+        FAX.Sync.tick()
         check_tick()
         request_tick()
         auto_tick()
@@ -3568,6 +3904,14 @@ end)
 windower.register_event('incoming text', function(original, modified, mode, modified_mode, blocked)
     -- (lines another addon hid are still read: hiding them doesn't make them less true)
     if not original or original == '' then return end
+    -- lamp news from a party member's NyzulAssist: "(Name) [NZ] 12 tA2" - use it, and hide the line
+    -- (yours echoes back as mode 5)
+    if (mode == 5 or mode == 13) and original:find('[NZ]', 1, true) then
+        local plain = original:strip_format()
+        local who, body = plain:match('^%(([^)]+)%)%s*%[NZ%]%s*(.-)%s*$')
+        if mode == 13 and body then FAX.Sync.receive(body, who) end
+        return true
+    end
     if mode == MODE_TELL_IN and (S.auto or FAX.FA.on or FAX.FA.retry) and settings.pause_on_tell then
         S.auto = false
         FAX.FA.hand_back('tell received', true)
@@ -3661,6 +4005,7 @@ windower.register_event('incoming chunk', function(id, data, modified, injected,
                 l.flag_t = os.clock()
                 if l.lit and not was then l.lit_t = os.clock() end
                 if was and not l.lit then l.dark_t = os.clock() end
+                if was ~= nil and was ~= l.lit then FAX.Sync.note_lit(slot, l.lit) end
                 -- (mask 0x08 = it just came into view: a lamp that's been lit a while isn't "switching on")
                 if l.lit and not was and bit.band(mask, 0x08) == 0 then lamp_switched_on(slot) end
                 lamp_late_reading(slot, l.lit)
@@ -3774,7 +4119,9 @@ windower.register_event('outgoing chunk', function(id, original, modified, injec
         debug_log(('menu: out 0x%03X %s%s'):format(id, FAX.Menus.hex(original:sub(5, 44)), injected and ' (addon)' or ''))
     end
     if id == 0x05B or id == 0x05C then
-        FAX.Menus.on_answer(id, packets.parse('outgoing', original), injected)
+        local p = packets.parse('outgoing', original)
+        FAX.Menus.on_answer(id, p, injected)
+        if id == 0x05B and S.in_nyzul then FAX.Sync.menu_answer(p) end   -- (a lamp's: did the touch take?)
         return
     end
     if id == 0x01A and not injected then
@@ -3849,6 +4196,7 @@ local function help_groups()
             'lit <letters> | lit none   after an order round: which lamps stayed ON, e.g. lit AC',
             'order <letters>        record a round it missed, e.g. order CABD (then use lit)',
             'lamps <n> | lamps reset    set the lamp count, or clear this floor\'s lamp history',
+            'sync [on|off]          share lamps (found, touched, lit, rounds) with party members running NyzulAssist (' .. onoff(settings.sync) .. ')',
          }},
         {name = 'Panel', aliases = {'panel', 'hud', 'ui', 'display', 'show', 'hide'},
          desc = 'what the info box shows and how it looks',
@@ -4106,6 +4454,16 @@ local function on_command(cmd, ...)
         end
         say('Directions: ' .. settings.directions .. '  (compass = N/NE/E..., clock = 12 is where you face)')
 
+    elseif cmd == 'sync' then
+        settings.sync = on_off(a1, settings.sync)
+        config.save(settings)
+        if settings.sync then
+            say('Lamp sharing with your party ' .. green('on') .. ': what lamps you find, touch and see light up goes to your party as short "[NZ] ..." lines. '
+                .. 'Party members running NyzulAssist read and hide them - they need //nz sync on too for you to hear from them.')
+        else
+            say('Lamp sharing with your party off. (Copies of NyzulAssist on this PC in your party always share.)')
+        end
+
     elseif cmd == 'armband' then
         S.has_armband = on_off(a1, S.has_armband)
         say('Assault armband bonus: ' .. (S.has_armband and 'on (+10% tokens)' or 'off'))
@@ -4127,6 +4485,7 @@ local function on_command(cmd, ...)
         r.lit = {}
         for _, s in ipairs(r.order) do r.lit[s] = on[s] or false end
         S.plan = nil
+        FAX.Sync.note_result(r)
         say(('Round %d: %s'):format(#S.rounds, describe_round(r)))
         local plan, n = current_plan()
         if plan then
@@ -4153,6 +4512,7 @@ local function on_command(cmd, ...)
         if a1 == 'reset' then
             S.rounds, S.round, S.touched, S.plan, S.pending_eval = {}, {}, {}, nil, nil
             S.game_round, S.lamp_min = {}, nil
+            S.round_bad, S.sync_wait = nil, {}
             say('Lamp history cleared.')
         elseif tonumber(a1) then
             S.lamp_override = math.max(1, math.min(5, tonumber(a1)))

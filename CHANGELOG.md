@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.0 (October 2026)
+
+- **Lamps with other players:** copies of NyzulAssist on the same PC (multiboxing) now share lamps automatically. With `//nz sync on`, party members running NyzulAssist share them too, through short `[NZ]` party chat lines that the addon reads and hides. Shared: the lamps each person has found, every touch and its place in the round, which all-at-once lamps are lit, and each round's result.
+- **Fix:** backing out of a lamp's menu no longer counts as touching it.
+
 ## 1.0.1 (October 2026)
 
 - **Setup window:** fixed its lines being drawn on top of each other the first time it opens. Every line is now the same width, with [close] at the right end of the title.

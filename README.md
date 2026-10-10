@@ -59,6 +59,17 @@ Everything else works without semi-auto: the panel, target finder, lamp solver a
 
 Directions are compass points that match the in-game map (`26y NE`). `//nz dir clock` switches to clock positions (12 o'clock = straight ahead).
 
+## Playing in a party
+
+On its own, NyzulAssist only knows about the lamps **you** touch. To track everyone's:
+
+- **Characters on the same PC (multiboxing):** their copies of NyzulAssist share lamps automatically.
+- **Other players:** everyone with NyzulAssist types `//nz sync on`. Lamp news then goes to party chat as short `[NZ] ...` lines, which NyzulAssist reads and hides. Party members without the addon will see those lines.
+
+Shared: the lamps each person has found, every touch and its place in the round, which all-at-once lamps are lit, and each round's result. The letters A-E are the same for everyone, so you can call lamps out in chat.
+
+If two people touch lamps at almost the same moment, it can't tell which came first and skips that round. A touch by someone without NyzulAssist also makes it skip the round; `//nz order` and `//nz lit` let you enter it by hand.
+
 ## Semi-auto (`//nz auto`)
 
 - Fights an objective mob once it's within 15 yalms (`//nz range 20` to change), and fights back against anything attacking you.
@@ -117,6 +128,7 @@ The panel shows your token total and what this session has made after paying to 
 | `//nz ws <name> <TP>` | your weaponskill |
 | `//nz buff add <name>` / `//nz heal add <name> <HP%>` | buffs and heals for any job |
 | `//nz lit <letters>` | which lamps stayed lit, if it couldn't see them |
+| `//nz sync on` / `off` | share lamps with party members running NyzulAssist |
 | `//nz stats` / `//nz tokens` | this session / your token totals |
 | `//nz hide` / `//nz show` | the panel and radar |
 | `//nz report` | a file to send with a bug report |
