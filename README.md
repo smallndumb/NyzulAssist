@@ -4,6 +4,8 @@ A Windower 4 addon for **Nyzul Isle Investigation**. It shows everything you nee
 
 Free, by SmallnDumb. If it saves you time, tips are welcome at [ko-fi.com/smallndumb](https://ko-fi.com/smallndumb).
 
+Questions, ideas and news: the [NyzulAssist thread on FFXIAH](https://www.ffxiah.com/forum/topic/59152/nyzulassist-nyzul-isle-helper).
+
 ![The panel and radar on a "specified enemies" floor: the impossible-to-gauge Racing Chariot, its family and the one attacking you](screenshots/specified-enemies.png)
 
 ## Features
@@ -125,7 +127,7 @@ The panel shows your token total and what this session has made after paying to 
 1. Type `//nz debug` to turn on the debug log (it starts a fresh one each time).
 2. Make it happen again.
 3. Type `//nz report`. It saves `data/report.txt` in the addon folder with your settings and the end of the log.
-4. Open an issue on [GitHub](https://github.com/SmallnDumb/NyzulAssist/issues) (or post in the FFXIAH thread) and attach that file.
+4. Open an issue on [GitHub](https://github.com/SmallnDumb/NyzulAssist/issues) (or post in the [FFXIAH thread](https://www.ffxiah.com/forum/topic/59152/nyzulassist-nyzul-isle-helper)) and attach that file.
 
 ## Updates
 
