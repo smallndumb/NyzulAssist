@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.1 (October 2026)
+
+- **Setup window:** fixed its lines being drawn on top of each other the first time it opens. Every line is now the same width, with [close] at the right end of the title.
+
 ## 1.0.0 (October 2026)
 
 First public release.

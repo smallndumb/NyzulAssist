@@ -1,2 +1,2 @@
-1.0.0
-First public release.
+1.0.1
+Fixes the setup window's lines overlapping when it opens.

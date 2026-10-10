@@ -23,7 +23,7 @@ Use at your own risk: Square Enix's ToS does not allow third-party tools.
 
 _addon.name     = 'NyzulAssist'
 _addon.author   = 'SmallnDumb'
-_addon.version  = '1.0.0'
+_addon.version  = '1.0.1'
 _addon.commands = {'nyzulassist', 'nz'}
 _addon.language = 'english'
 
@@ -2955,9 +2955,13 @@ end)
 -- Setup window (//nz setup): click a line to switch it on or off
 ---------------------------------------------------------------------------
 do
-local Setup = {rows = {}, visible = false, line_h = 19, width = 0}
+local Setup = {rows = {}, visible = false, line_h = 0, width = 0, chars = 0}
 FAX.Setup = Setup
-local W = 64                                   -- characters a line (padded, so the clickable area is even)
+local W = 64                                   -- characters a line at least (all padded to the longest, so the window is even)
+local FONT = 10
+-- size estimates for Consolas 10 with 2 px padding, until the game has drawn the text once
+local function est_w(chars) return math.floor(chars * FONT * 0.73 + 4 + 0.5) end
+local EST_H = math.floor(FONT * 1.45 + 4 + 0.5)
 
 local function onoff(v) return v and green('[ ON]') or grey('[off]') end
 local function hint(cmd) return function() say(grey('Type ') .. cmd) end end
@@ -2967,8 +2971,7 @@ function Setup.items()
     local items = {}
     local function add(text, act) items[#items + 1] = {text = text, act = act} end
     local function head(text) add(grey('-- ' .. text .. ' ' .. string.rep('-', W - 5 - #text))) end
-    add(('NyzulAssist %s setup'):format(_addon.version) .. grey('   (click a line)') .. string.rep(' ', 14) .. orange('[close]'),
-        function() Setup.hide() end)
+    items[1] = {title = ('NyzulAssist %s setup'):format(_addon.version) .. grey('   (click a line)'), act = function() Setup.hide() end}
     head('Fighting')
     add(onoff(S.auto) .. ' Semi-auto: fights objective mobs near you', run('auto'))
     add('      Weaponskill: ' .. (settings.ws_name ~= '' and ('%s at %d TP'):format(settings.ws_name, settings.ws_tp) or orange('none')),
@@ -3001,7 +3004,8 @@ function Setup.items()
     head('Other')
     add(onoff(S.debug) .. ' Debug log (for bug reports: //nz report)', run('debug'))
     add(onoff(settings.update_check) .. ' Look for a new version once a week, at login', run('update', settings.update_check and 'off' or 'on'))
-    add(grey('Tips: ' .. FAX.TIP_URL .. '   Help: //nz help   Updates: ' .. FAX.HOME_URL))
+    add(grey('Help: //nz help    Tips: ' .. FAX.TIP_URL))
+    add(grey('Updates: ' .. FAX.HOME_URL))
     return items
 end
 
@@ -3021,31 +3025,66 @@ local function row(i)
     return r
 end
 
+-- put the rows one under the other
+local function place()
+    local x, y = settings.setup_pos.x, settings.setup_pos.y
+    for i = 1, Setup.n or 0 do
+        local r = Setup.rows[i]
+        r.y = y + (i - 1) * Setup.line_h
+        r.t:pos(x, r.y)
+    end
+end
+
+-- the game measures a text when it draws it, so right after a change extents() still gives
+-- the old size (for a new row: just its padding, 4 x 4). Measure a moment later, and keep
+-- the estimates until the numbers are believable.
+function Setup.measure()
+    Setup.measuring = nil
+    if not Setup.visible or not Setup.rows[1] then return end
+    local w, h = Setup.rows[1].t:extents()
+    if not (w and h and h >= 10 and h <= 60 and w >= Setup.chars * 4) then
+        Setup.tries = (Setup.tries or 0) + 1
+        if Setup.tries <= 8 then
+            Setup.measuring = true
+            coroutine.schedule(Setup.measure, 0.25)
+        end
+        return
+    end
+    Setup.tries = 0
+    if math.abs(h - Setup.line_h) >= 1 or math.abs(w - Setup.width) >= 2 then
+        Setup.line_h, Setup.width = h, w
+        place()
+    end
+end
+
 function Setup.draw()
     if not Setup.visible then return end
     local items = Setup.items()
-    local x, y = settings.setup_pos.x, settings.setup_pos.y
-    local first = row(1)
+    local chars = W
+    for _, it in ipairs(items) do chars = math.max(chars, #strip_codes(it.text or it.title) + (it.title and 8 or 0)) end
     for i, it in ipairs(items) do
         local r = row(i)
-        local plain = strip_codes(it.text)
-        r.t:text(it.text .. string.rep(' ', math.max(0, W - #plain)))
+        local text
+        if it.title then                               -- [close] at the right-hand end
+            text = it.title .. string.rep(' ', chars - #strip_codes(it.title) - 7) .. orange('[close]')
+        else
+            text = it.text .. string.rep(' ', chars - #strip_codes(it.text))
+        end
+        r.t:text(text)
         r.act = it.act
         r.t:show()
     end
-    local w, h = first.t:extents()
-    if h and h > 0 then Setup.line_h = h end
-    if w and w > 0 then Setup.width = w
-    elseif Setup.width <= 0 then
-        Setup.width = W * 7 + 4                        -- (Consolas 10: about 7 px a character)
-        if not Setup.remeasure then
-            Setup.remeasure = true
-            coroutine.schedule(function() Setup.draw() end, 0.3)
-        end
-    end
-    for i = 1, #items do Setup.rows[i].t:pos(x, y + (i - 1) * Setup.line_h); Setup.rows[i].y = y + (i - 1) * Setup.line_h end
     for i = #items + 1, #Setup.rows do Setup.rows[i].t:hide(); Setup.rows[i].act, Setup.rows[i].y = nil, nil end
     Setup.n = #items
+    if chars ~= Setup.chars then                       -- (a longer line: estimate the width again, then measure)
+        Setup.chars, Setup.width = chars, est_w(chars)
+    end
+    if Setup.line_h <= 0 then Setup.line_h = EST_H end
+    place()
+    if not Setup.measuring then
+        Setup.tries, Setup.measuring = 0, true
+        coroutine.schedule(Setup.measure, 0.25)
+    end
 end
 function Setup.show() Setup.visible = true; Setup.draw() end
 function Setup.hide()
