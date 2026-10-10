@@ -4,6 +4,8 @@ A Windower 4 addon for **Nyzul Isle Investigation**. It shows everything you nee
 
 Free, by SmallnDumb. If it saves you time, tips are welcome at [ko-fi.com/smallndumb](https://ko-fi.com/smallndumb).
 
+![The panel and radar on a "specified enemies" floor: the impossible-to-gauge Racing Chariot, its family and the one attacking you](screenshots/specified-enemies.png)
+
 ## Features
 
 - **Floor panel:** floor, run timer, objective, the floor's rule (Archaic Gears), Pathos penalties, the Rune of Transfer's distance and direction, and a token estimate.
@@ -15,9 +17,20 @@ Free, by SmallnDumb. If it saves you time, tips are welcome at [ko-fi.com/smalln
 - **Tokens and stats:** your token total, what each session made you, and tokens per hour.
 - **Setup window:** `//nz setup` - click to switch things on and off.
 
+## Screenshots
+
+| | |
+|---|---|
+| ![Impossible to gauge target found](screenshots/impossible-to-gauge.png) | ![Enemy leader floor](screenshots/enemy-leader.png) |
+| The "impossible to gauge" Draugar, 2 yalms west | The leader on an enemy-leader floor |
+| ![Floor done](screenshots/floor-done.png) | ![Lamp floor](screenshots/lamps.png) |
+| Floor done: **GO** and the arrow to the Rune | A lamp floor, with the next lamp on the radar |
+
+![The setup window](screenshots/setup-window.png)
+
 ## Install
 
-1. Download the latest `NyzulAssist-x.y.z.zip` from the [Releases page](https://github.com/SmallnDumb/NyzulAssist/releases).
+1. Download the latest `NyzulAssist-x.y.z.zip` from the [Releases page](https://github.com/SmallnDumb/NyzulAssist/releases) (not the "Source code" files).
 2. Unzip it into `Windower/addons/`, so the file ends up at `Windower/addons/NyzulAssist/NyzulAssist.lua`.
 3. In game, type `//lua load nyzulassist`. To load it every time, add `lua load nyzulassist` to `Windower/scripts/init.txt`.
 
