@@ -67,7 +67,7 @@ Directions are compass points that match the in-game map (`26y NE`). `//nz dir c
   - `//nz ws backup <name>` - used on mobs your weaponskill heals, and instead of an area weaponskill next to an Archaic Gear.
 - Never fights an Archaic Gear on "Do not destroy archaic gears" floors.
 - Targets the next lamp, or the Rune once the floor is done, when you walk up to it. You press Enter and answer the menu yourself.
-- **Pauses** on a /tell or a GM message, and turns off when you die or leave Nyzul.
+- **Pauses** on a /tell and turns off when you die or leave Nyzul.
 
 ## Jobs
 
